@@ -19,7 +19,7 @@ from gem.utils import graph_util, plot_util
 from gem.evaluation import visualize_embedding as viz
 from .sdne_utils import *
 
-from keras.layers import Input, Dense, Lambda, merge
+from keras.layers import Input, Dense, Lambda, merge,Subtract,Concatenate
 from keras.models import Model, model_from_json
 import keras.regularizers as Reg
 from keras.optimizers import SGD, Adam
@@ -72,7 +72,7 @@ class SDNE(StaticGraphEmbedding):
     def get_method_summary(self):
         return '%s_%d' % (self._method_name, self._d)
 
-    def learn_embedding(self, graph=None, edge_f=None,
+    def prep_embedding(self, graph=None, edge_f=None,
                         is_weighted=False, no_python=False):
         if not graph and not edge_f:
             raise Exception('graph/edge_f needed')
@@ -81,8 +81,28 @@ class SDNE(StaticGraphEmbedding):
         S = nx.to_scipy_sparse_matrix(graph)
         t1 = time()
         S = (S + S.T) / 2
+        print (S.shape)
+        self._node_num = graph.number_of_nodes()
+        print (self._node_num)
+
+    def learn_embedding(self, graph=None, edge_f=None,
+                        is_weighted=False, no_python=False):
+        if not graph and not edge_f:
+            raise Exception('graph/edge_f needed')
+        if not graph:
+            graph = graph_util.loadGraphFromEdgeListTxt(edge_f)
+        S = nx.to_scipy_sparse_matrix(graph)
+        
+        print ("S graph adj mat ")
+        print (S.shape)
+        print ("S graph adj mat  maximum")
+        print (np.amax(S))
         self._node_num = graph.number_of_nodes()
 
+        print ("S graph nodes")
+        print (self._node_num)
+        t1 = time()
+        S = (S + S.T) / 2
         # Generate encoder, decoder and autoencoder
         self._num_iter = self._n_iter
         # If cannot use previous step information, initialize new models
@@ -103,24 +123,44 @@ class SDNE(StaticGraphEmbedding):
             lambda x: x[:, 0:self._node_num],
             output_shape=(self._node_num,)
         )(x_in)
+        #x1= x_in[:, 0:self._node_num]
         x2 = Lambda(
             lambda x: x[:, self._node_num:2 * self._node_num],
             output_shape=(self._node_num,)
         )(x_in)
+        #x2= x_in[:, self._node_num:2 * self._node_num]
+
         # Process inputs
         [x_hat1, y1] = self._autoencoder(x1)
         [x_hat2, y2] = self._autoencoder(x2)
         # Outputs
-        x_diff1 = merge([x_hat1, x1],
-                        mode=lambda ab: ab[0] - ab[1],
-                        output_shape=lambda L: L[1])
-        x_diff2 = merge([x_hat2, x2],
-                        mode=lambda ab: ab[0] - ab[1],
-                        output_shape=lambda L: L[1])
-        y_diff = merge([y2, y1],
-                       mode=lambda ab: ab[0] - ab[1],
-                       output_shape=lambda L: L[1])
+        # x_diff1 = merge([x_hat1, x1],
+        #                 mode=lambda ab: ab[0] - ab[1],
+        #                 output_shape=lambda L: L[1])
+        # x_diff1 = Subtract() ([x_hat1, x1])
+                        
+        # x_diff2 = merge([x_hat2, x2],
+        #                 mode=lambda ab: ab[0] - ab[1],
+        #                 output_shape=lambda L: L[1])
+        # y_diff = merge([y2, y1],
+        #                mode=lambda ab: ab[0] - ab[1],
+        #                output_shape=lambda L: L[1])
 
+        x_diff1 = Subtract() ([x_hat1, x1])
+        x_diff2 = Subtract() ([x_hat2, x2])
+        y_diff = Subtract() ([y2, y1])
+        #dummy_1 = KBack.constant(0.0,shape=(1, None))
+        #dummy_2 = KBack.constant(0.0,shape=(1, None))
+        dummy_1=KBack.sum(x_diff1,axis=1,keepdims=True)
+        dummy_2=KBack.sum(x_diff2,axis=1,keepdims=True)
+        #dummy_2=KBack.zeros(shape=(1,None))
+        z_diff1 = Concatenate(axis = 1)([x_diff1,dummy_1])
+        z_diff2 = Concatenate(axis = 1)([x_diff2,dummy_2])
+        #print (x_diff1.get_config())
+        #print (x_diff2.get_config())
+        #print (y_diff._keras_shape)
+        #tf.Print (x_diff2, [KBack.shape(x_diff2)])
+        #tf.Print (y_diff, [KBack.shape(y_diff)])
         # Objectives
         def weighted_mse_x(y_true, y_pred):
             ''' Hack: This fn doesn't accept additional arguments.
@@ -145,7 +185,14 @@ class SDNE(StaticGraphEmbedding):
             ) * y_true
 
         # Model
-        self._model = Model(input=x_in, output=[x_diff1, x_diff2, y_diff])
+        self._model = Model(input=x_in, output=[z_diff1, z_diff2, y_diff])
+        #print (self._model.summary())
+        
+        # print (self._model.get_layer('merge_1').input_shape)
+        # print (self._model.get_layer('merge_1').output_shape)
+        # print (self._model.get_layer('merge_2').input_shape)
+        # print (self._model.get_layer('merge_2').output_shape)
+        # print (self._model.get_layer('model_3').output_shape)
         sgd = SGD(lr=self._xeta, decay=1e-5, momentum=0.99, nesterov=True)
         # adam = Adam(lr=self._xeta, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
         self._model.compile(
